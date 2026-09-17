@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/rooms/:roomCode/items",
+      "destination": "/api/rooms/[roomCode]/items"
+    },
+    {
+      "source": "/api/health",
+      "destination": "/api/health"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

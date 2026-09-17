@@ -1,3 +1,4 @@
+import mqtt, { MqttClient } from 'mqtt';
 import {
   DecryptedClipboardItem,
   EncryptedClipboardItem,
@@ -39,6 +40,9 @@ type Listener = () => void;
 
 class SyncManager {
   private ws: WebSocket | null = null;
+  private mqttClient: MqttClient | null = null;
+  private broadcastChannel: BroadcastChannel | null = null;
+  private mqttBrokerIndex: number = 0;
   private listeners: Set<Listener> = new Set();
 
   public status: ConnectionStatus = 'disconnected';
@@ -78,6 +82,13 @@ class SyncManager {
       this.status = 'offline';
       this.notify();
     });
+
+    window.addEventListener('beforeunload', () => {
+      this.transmitMessage({
+        type: 'device:left',
+        deviceId: this.currentDevice.id,
+      });
+    });
   }
 
   public subscribe(fn: Listener): () => void {
@@ -87,6 +98,23 @@ class SyncManager {
 
   private notify(): void {
     this.listeners.forEach((fn) => fn());
+  }
+
+  public isConnected(): boolean {
+    const wsConnected = !!(this.ws && this.ws.readyState === WebSocket.OPEN);
+    const mqttConnected = !!(this.mqttClient && this.mqttClient.connected);
+    return wsConnected || mqttConnected;
+  }
+
+  private isServerlessStaticHost(): boolean {
+    if (typeof window === 'undefined') return false;
+    const h = window.location.hostname;
+    return (
+      h.endsWith('.vercel.app') ||
+      h.includes('netlify') ||
+      h.endsWith('.pages.dev') ||
+      h.endsWith('.github.io')
+    );
   }
 
   /**
@@ -140,6 +168,9 @@ class SyncManager {
       this.devices = [this.currentDevice];
     }
 
+    // Setup inter-tab synchronization
+    this.setupBroadcastChannel();
+
     // 1. Load local cached items first (offline-first!)
     const local = await getLocalItems();
     this.items = local;
@@ -147,19 +178,45 @@ class SyncManager {
     this.pendingCount = pending.length;
     this.notify();
 
-    // 2. Connect or re-join WebSocket
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
+    // 2. Multi-Transport Connection Selection
+    if (this.isServerlessStaticHost()) {
+      // Vercel / Netlify / Static hosting: Connect directly to zero-knowledge MQTT cloud mesh!
+      // This eliminates 404 / connection failed errors to /ws on Vercel
+      this.connectMqttMesh();
+    } else {
+      // Container / VPS / Cloud Run / Localhost: Try dedicated WebSocket server
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.transmitMessage({
           type: 'join-room',
-          roomCode: this.roomCode,
           deviceId: this.currentDevice.id,
           deviceName: this.currentDevice.name,
           deviceType: this.currentDevice.type,
-        })
-      );
-    } else {
-      this.connectWebSocket();
+        });
+      } else {
+        this.connectWebSocket();
+      }
+    }
+  }
+
+  private setupBroadcastChannel(): void {
+    if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') return;
+    if (this.broadcastChannel) {
+      try {
+        this.broadcastChannel.close();
+      } catch {
+        // ignore
+      }
+      this.broadcastChannel = null;
+    }
+    try {
+      this.broadcastChannel = new BroadcastChannel(`clipsync_${this.roomCode}`);
+      this.broadcastChannel.onmessage = (event) => {
+        if (event.data && event.data.senderId !== this.currentDevice.id) {
+          this.handleSocketMessage(event.data);
+        }
+      };
+    } catch (e) {
+      console.warn('BroadcastChannel error:', e);
     }
   }
 
@@ -224,15 +281,131 @@ class SyncManager {
       };
 
       this.ws.onerror = (err) => {
-        console.warn('WS error:', err);
-        // Fallback to REST poll if WS fails
+        console.warn('Local WS unavailable; activating zero-knowledge cloud mesh:', err);
+        // Seamless fallback to cloud mesh on hosts where local WS is not available
+        this.connectMqttMesh();
         this.fallbackRestSync();
       };
     } catch (e) {
-      console.warn('WS connect failed:', e);
-      this.status = 'disconnected';
-      this.notify();
+      console.warn('WS connect failed, activating cloud mesh:', e);
+      this.connectMqttMesh();
       this.scheduleReconnect();
+    }
+  }
+
+  private connectMqttMesh(): void {
+    if (this.mqttClient && (this.mqttClient.connected || this.mqttClient.reconnecting)) {
+      return;
+    }
+
+    if (!navigator.onLine) {
+      this.status = 'offline';
+      this.notify();
+      return;
+    }
+
+    this.status = 'connecting';
+    this.notify();
+
+    const brokers = [
+      'wss://broker.emqx.io:8084/mqtt',
+      'wss://broker.hivemq.com:8884/mqtt',
+    ];
+    const brokerUrl = brokers[this.mqttBrokerIndex % brokers.length];
+    const clientId = `clipsync_${this.currentDevice.id.slice(0, 8)}_${Math.random().toString(36).substring(2, 6)}`;
+
+    try {
+      this.mqttClient = mqtt.connect(brokerUrl, {
+        clientId,
+        clean: true,
+        connectTimeout: 7000,
+        reconnectPeriod: 4000,
+      });
+
+      const topic = `clipsync/room/${this.roomCode}`;
+
+      this.mqttClient.on('connect', () => {
+        this.status = 'connected';
+        this.reconnectAttempts = 0;
+        this.notify();
+
+        this.mqttClient?.subscribe(topic, (err) => {
+          if (!err) {
+            // Announce presence immediately
+            this.transmitMessage({
+              type: 'device:joined',
+              device: this.currentDevice,
+            });
+          }
+        });
+
+        this.startHeartbeat();
+        this.flushPendingQueue();
+      });
+
+      this.mqttClient.on('message', (_t: string, payload: Buffer) => {
+        try {
+          const data = JSON.parse(payload.toString());
+          if (data && data.senderId !== this.currentDevice.id) {
+            this.handleSocketMessage(data);
+          }
+        } catch (e) {
+          console.error('MQTT message parse error:', e);
+        }
+      });
+
+      this.mqttClient.on('error', (err) => {
+        console.warn('MQTT mesh broker error, switching broker:', err);
+        this.mqttBrokerIndex++;
+      });
+
+      this.mqttClient.on('close', () => {
+        if (this.status !== 'offline' && (!this.ws || this.ws.readyState !== WebSocket.OPEN)) {
+          this.status = 'disconnected';
+          this.notify();
+        }
+      });
+    } catch (e) {
+      console.warn('Failed initializing MQTT cloud mesh:', e);
+      this.fallbackRestSync();
+    }
+  }
+
+  public transmitMessage(payload: any): void {
+    const fullPayload = {
+      ...payload,
+      roomCode: this.roomCode,
+      senderId: this.currentDevice.id,
+      timestamp: payload.timestamp || Date.now(),
+    };
+    const json = JSON.stringify(fullPayload);
+
+    // 1. Primary WebSocket if open
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(json);
+      } catch (err) {
+        console.warn('WS send failed:', err);
+      }
+    }
+
+    // 2. MQTT Cloud Mesh if connected
+    if (this.mqttClient && this.mqttClient.connected) {
+      try {
+        const topic = `clipsync/room/${this.roomCode}`;
+        this.mqttClient.publish(topic, json);
+      } catch (err) {
+        console.warn('MQTT publish failed:', err);
+      }
+    }
+
+    // 3. Local BroadcastChannel for other tabs on same machine
+    if (this.broadcastChannel) {
+      try {
+        this.broadcastChannel.postMessage(fullPayload);
+      } catch (err) {
+        console.warn('BroadcastChannel send failed:', err);
+      }
     }
   }
 
@@ -242,7 +415,11 @@ class SyncManager {
     this.reconnectAttempts++;
     this.reconnectTimer = window.setTimeout(() => {
       if (this.roomCode) {
-        this.connectWebSocket();
+        if (this.isServerlessStaticHost()) {
+          this.connectMqttMesh();
+        } else {
+          this.connectWebSocket();
+        }
       }
     }, delay);
   }
@@ -250,8 +427,24 @@ class SyncManager {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.pingTimer = window.setInterval(() => {
+      // 1. WebSocket heartbeat
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: 'ping' }));
+      }
+      // 2. Mesh presence ping
+      this.transmitMessage({
+        type: 'presence:ping',
+        device: this.currentDevice,
+      });
+
+      // 3. Clean up stale peers not seen for > 60 seconds
+      const now = Date.now();
+      const active = this.devices.filter(
+        (d) => d.isCurrentDevice || (now - d.lastSeen < 60000)
+      );
+      if (active.length !== this.devices.length) {
+        this.devices = active;
+        this.notify();
       }
     }, 20000);
   }
@@ -264,10 +457,10 @@ class SyncManager {
   }
 
   private async handleSocketMessage(msg: any): Promise<void> {
+    if (!msg || msg.senderId === this.currentDevice.id) return;
     const { type } = msg;
 
     if (type === 'room:joined') {
-      // Received existing encrypted items for the room
       const rawItems: EncryptedClipboardItem[] = msg.items || [];
       const remoteDevices: Device[] = msg.devices || [];
 
@@ -286,35 +479,66 @@ class SyncManager {
         await this.processIncomingEncryptedItem(enc, false);
       }
       this.notify();
-    } else if (type === 'device:joined' || type === 'device:left') {
-      const remoteDevices: Device[] = msg.devices || [];
-      const devMap = new Map<string, Device>();
-      devMap.set(this.currentDevice.id, this.currentDevice);
-      for (const d of remoteDevices) {
-        devMap.set(d.id, {
-          ...d,
-          isCurrentDevice: d.id === this.currentDevice.id,
+    } else if (type === 'presence:ping' || type === 'device:presence_ack') {
+      if (msg.device && msg.device.id !== this.currentDevice.id) {
+        const devMap = new Map<string, Device>();
+        devMap.set(this.currentDevice.id, this.currentDevice);
+        for (const d of this.devices) devMap.set(d.id, d);
+        const existing = devMap.get(msg.device.id);
+        devMap.set(msg.device.id, {
+          ...msg.device,
+          lastSeen: Date.now(),
+          isCurrentDevice: false,
         });
-      }
-      this.devices = Array.from(devMap.values());
+        this.devices = Array.from(devMap.values());
 
+        if (!existing) {
+          this.latestDeviceEvent = { type: 'joined', device: msg.device };
+          if (this.hapticFeedback) {
+            playTactileTick({ intensity: 'medium' });
+          }
+          // Acknowledge presence so new peer gets this device immediately
+          this.transmitMessage({
+            type: 'device:presence_ack',
+            device: this.currentDevice,
+          });
+        }
+        this.notify();
+      }
+    } else if (type === 'device:joined' || type === 'device:left') {
       if (type === 'device:joined' && msg.device && msg.device.id !== this.currentDevice.id) {
+        const devMap = new Map<string, Device>();
+        devMap.set(this.currentDevice.id, this.currentDevice);
+        for (const d of this.devices) devMap.set(d.id, d);
+        devMap.set(msg.device.id, {
+          ...msg.device,
+          lastSeen: Date.now(),
+          isCurrentDevice: false,
+        });
+        this.devices = Array.from(devMap.values());
+
         this.latestDeviceEvent = { type: 'joined', device: msg.device };
         if (this.hapticFeedback) {
           playTactileTick({ intensity: 'medium' });
         }
+        // Respond with presence ack so newcomer discovers us immediately!
+        this.transmitMessage({
+          type: 'device:presence_ack',
+          device: this.currentDevice,
+        });
       } else if (type === 'device:left' && msg.deviceId && msg.deviceId !== this.currentDevice.id) {
-        const leftDev = this.devices.find((d) => d.id === msg.deviceId) || {
+        this.devices = this.devices.filter((d) => d.id !== msg.deviceId);
+        const leftDev: Device = {
           id: msg.deviceId,
           name: 'Device',
-          type: 'desktop' as const,
+          type: 'desktop',
           joinedAt: 0,
           lastSeen: 0,
         };
         this.latestDeviceEvent = { type: 'left', device: leftDev };
       }
       this.notify();
-    } else if (type === 'item:new') {
+    } else if (type === 'item:new' || type === 'item:send') {
       const encItem: EncryptedClipboardItem = msg.item;
       if (encItem) {
         const isFromOtherDevice = encItem.senderId !== this.currentDevice.id;
@@ -487,15 +711,14 @@ class SyncManager {
         previewHint: `${contentType.toUpperCase()} • ${trimmed.length} chars`,
       };
 
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (this.isConnected()) {
         analyticsService.recordSync('outbound', this.currentDevice.name);
-        this.ws.send(
-          JSON.stringify({
-            type: 'item:send',
-            roomCode: this.roomCode,
-            item: encryptedItem,
-          })
-        );
+        this.transmitMessage({
+          type: 'item:send',
+          item: encryptedItem,
+        });
+        localItem.syncStatus = 'synced';
+        this.notify();
       } else {
         analyticsService.recordSync('outbound', this.currentDevice.name);
         // Offline or disconnected: queue in outbox
@@ -531,15 +754,10 @@ class SyncManager {
     }
     this.notify();
 
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          type: 'items:delete_batch',
-          roomCode: this.roomCode,
-          itemIds,
-        })
-      );
-    }
+    this.transmitMessage({
+      type: 'items:deleted_batch',
+      itemIds,
+    });
   }
 
   /**
@@ -565,16 +783,11 @@ class SyncManager {
     }
     this.notify();
 
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          type: 'items:pin_batch',
-          roomCode: this.roomCode,
-          itemIds,
-          pinned,
-        })
-      );
-    }
+    this.transmitMessage({
+      type: 'items:pinned_batch',
+      itemIds,
+      pinned,
+    });
   }
 
   /**
@@ -585,14 +798,9 @@ class SyncManager {
     await clearLocalItems(true);
     this.notify();
 
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          type: 'items:clear',
-          roomCode: this.roomCode,
-        })
-      );
-    }
+    this.transmitMessage({
+      type: 'items:cleared',
+    });
   }
 
   /**
@@ -617,14 +825,11 @@ class SyncManager {
           contentType: item.contentType,
         };
 
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(
-            JSON.stringify({
-              type: 'item:send',
-              roomCode: this.roomCode,
-              item: encryptedItem,
-            })
-          );
+        if (this.isConnected()) {
+          this.transmitMessage({
+            type: 'item:send',
+            item: encryptedItem,
+          });
           await removePendingSync(item.id);
           const found = this.items.find((i) => i.id === item.id);
           if (found) found.syncStatus = 'synced';
@@ -641,7 +846,11 @@ class SyncManager {
 
   private handleNetworkOnline(): void {
     if (this.status === 'offline') {
-      this.connectWebSocket();
+      if (this.isServerlessStaticHost()) {
+        this.connectMqttMesh();
+      } else {
+        this.connectWebSocket();
+      }
     }
   }
 

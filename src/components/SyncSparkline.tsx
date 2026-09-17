@@ -102,14 +102,17 @@ export const SyncSparkline: React.FC<SyncSparklineProps> = ({
         });
       }
 
-      // Subtle GSAP entrance for telemetry metric badges
-      gsap.from('.telemetry-metric-badge', {
-        opacity: 0,
-        y: 8,
-        stagger: 0.08,
-        duration: 0.45,
-        ease: 'power3.out',
-      });
+      // Subtle GSAP entrance for telemetry metric badges if present
+      const badges = containerRef.current?.querySelectorAll('.telemetry-metric-badge');
+      if (badges && badges.length > 0) {
+        gsap.from(badges, {
+          opacity: 0,
+          y: 8,
+          stagger: 0.08,
+          duration: 0.45,
+          ease: 'power3.out',
+        });
+      }
     }, containerRef);
 
     return () => ctx.revert();
@@ -123,6 +126,14 @@ export const SyncSparkline: React.FC<SyncSparklineProps> = ({
         { opacity: 0, scaleY: 0.94 },
         { opacity: 1, scaleY: 1, duration: 0.35, ease: 'back.out(1.2)' }
       );
+      const badges = containerRef.current?.querySelectorAll('.telemetry-metric-badge');
+      if (badges && badges.length > 0) {
+        gsap.fromTo(
+          badges,
+          { opacity: 0, y: 8 },
+          { opacity: 1, y: 0, stagger: 0.08, duration: 0.4, ease: 'power3.out' }
+        );
+      }
     }
   }, [isExpanded]);
 

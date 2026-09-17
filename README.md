@@ -49,63 +49,66 @@
 
 ---
 
-## Architecture & Data Flow
+## Architecture & Multi-Transport Engine
+
+The application employs an adaptive multi-transport sync engine designed for high availability across any hosting platform:
 
 ```
-[ Device A (Desktop) ]
-        │  1. Capture & Encrypt (AES-256-GCM)
-        ▼
-[ WebSocket Relay Server (/ws) ]
-        │  2. Ephemeral Room Broadcast (Zero-Knowledge)
-        ▼
-[ Device B (Mobile Phone) ]
-        │  3. Decrypt (Web Crypto API) & Auto-Copy to Clipboard
+                  ┌──────────────────────────────────────────────┐
+                  │           Device A (Web Browser)             │
+                  │  AES-256-GCM Encryption (crypto.subtle)      │
+                  └──────┬───────────────────────┬───────────────┘
+                         │                       │
+      Primary Transport  │    Zero-Knowledge     │  Same-Machine
+       (Local/VPS/Cloud) │      Cloud Mesh       │   Tabs Sync
+                         ▼    (Vercel/Serverless)▼
+             ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐
+             │ Node.js /ws Server   │  │ TLS MQTT WSS Mesh    │  │ BroadcastChannel API │
+             │  Express + WS Engine │  │ EMQX & HiveMQ Clusters│  │ Direct Tab-to-Tab    │
+             └───────────┬──────────┘  └──────────┬───────────┘  └──────────┬───────────┘
+                         │                        │                         │
+                         └────────────────┬───────┴─────────────────────────┘
+                                          │ Encrypted Ciphertext
+                                          ▼
+                  ┌──────────────────────────────────────────────┐
+                  │           Device B (Phone/Tablet)            │
+                  │  AES-256-GCM Decryption (crypto.subtle)      │
+                  │  Instant Auto-Copy to Clipboard              │
+                  └──────────────────────────────────────────────┘
 ```
+
+### Transport Modes
+1. **Dedicated WebSocket Server (`/ws`):** Used when running locally, in Docker, or on container hosts (Cloud Run, Railway, Render, Fly.io, VPS).
+2. **Serverless Encrypted Cloud Mesh (TLS WSS):** Automatically engaged when hosted on Vercel, Netlify, Cloudflare Pages, or static CDNs where persistent custom WebSocket servers are not supported. Operates over TLS port 8084 with zero server-side state.
+3. **Local BroadcastChannel:** Instantly mirrors clipboard events across tabs and windows open on the same computer without consuming external network bandwidth.
+4. **Serverless REST Outbox:** Serverless fallback endpoints (`/api/rooms/[roomCode]/items`) for asynchronous catchup and firewalled networks.
 
 ---
 
 ## Tech Stack
 
 - **Frontend:** React 19, TypeScript, Tailwind CSS, Motion (`motion/react`)
-- **Backend:** Node.js, Express, WebSocket Server (`ws`)
-- **Cryptography:** Native Web Crypto API (`window.crypto.subtle`)
+- **Backend:** Node.js, Express, WebSocket Server (`ws`), Serverless functions (`/api/*`)
+- **Mesh Transport:** MQTT over WebSocket (`mqtt`), BroadcastChannel API
+- **Cryptography:** Native Web Crypto API (`window.crypto.subtle`), AES-256-GCM, PBKDF2 (100k rounds)
 - **PWA:** Installable Service Worker with offline caching
 
 ---
 
-## Getting Started
+## Deployment Options
 
-### Prerequisites
-- Node.js 18+
-- npm or yarn
+### Deploy to Vercel (Serverless)
+The app is pre-configured for Vercel via `vercel.json` and serverless API handlers in `/api/`:
+1. Push this repository to GitHub.
+2. Import the project into Vercel.
+3. Deploy! The app will automatically connect through the encrypted zero-knowledge cloud mesh and `BroadcastChannel`, enabling cross-device sync with zero server maintenance.
 
-### Installation
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd <project-directory>
-
-# Install dependencies
-npm install
-```
-
-### Development
-
-```bash
-# Start the unified Express & Vite development server
-npm run dev
-```
-
-Open `http://localhost:3000` in your browser.
-
-### Production Build
-
+### Deploy with Custom WebSocket Server (Render / Railway / Cloud Run / Docker)
 ```bash
 # Build the client and bundle the server
 npm run build
 
-# Start the production server
+# Start the unified Express & WebSocket server
 npm start
 ```
 
