@@ -133,11 +133,30 @@ export function generateRoomCode(): string {
 }
 
 /**
- * Generates a high-entropy room secret key
+ * Derives a deterministic cryptographic passphrase from a Room Code.
+ * Allows instant pairing simply by entering the 6-digit room code without typing a 32-char hex key.
  */
-export function generateSecretKey(): string {
+export function deriveDefaultSecretFromRoomCode(roomCode: string): string {
+  const normalized = roomCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < normalized.length; i++) {
+    hash ^= normalized.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  const hexHash = (hash >>> 0).toString(16).padStart(8, '0');
+  return `clipsync-${normalized}-${hexHash}`;
+}
+
+/**
+ * Generates a room secret key (either derived from roomCode or random entropy)
+ */
+export function generateSecretKey(roomCode?: string): string {
+  if (roomCode) {
+    return deriveDefaultSecretFromRoomCode(roomCode);
+  }
   const bytes = window.crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 }
+

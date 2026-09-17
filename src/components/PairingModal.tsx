@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -12,7 +12,7 @@ import {
   Plus,
   Lock,
 } from 'lucide-react';
-import { generateRoomCode, generateSecretKey } from '../services/crypto';
+import { generateRoomCode, generateSecretKey, deriveDefaultSecretFromRoomCode } from '../services/crypto';
 import { copyToClipboard, playTactileTick } from '../services/clipboard';
 
 interface PairingModalProps {
@@ -40,11 +40,22 @@ export const PairingModal: React.FC<PairingModalProps> = ({
   const [inputSecret, setInputSecret] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
-  if (!isOpen) return null;
+  // Build direct pair URL with query params (guaranteed preservation by all phone camera QR scanners)
+  const pairUrl = useMemo(() => {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', roomCode);
+      if (secretKey) {
+        url.searchParams.set('key', secretKey);
+      }
+      url.hash = 'app';
+      return url.toString();
+    } catch {
+      return `${window.location.origin}/?room=${encodeURIComponent(roomCode)}&key=${encodeURIComponent(secretKey)}#app`;
+    }
+  }, [roomCode, secretKey]);
 
-  // Build direct pair URL with hash fragments or params
-  const origin = window.location.origin;
-  const pairUrl = `${origin}/#room=${encodeURIComponent(roomCode)}&key=${encodeURIComponent(secretKey)}`;
+  if (!isOpen) return null;
 
   const handleCopyLink = async () => {
     const success = await copyToClipboard(pairUrl);
@@ -80,14 +91,14 @@ export const PairingModal: React.FC<PairingModalProps> = ({
       setErrorMsg('Please enter a room code (e.g. 742-891)');
       return;
     }
-    const cleanSecret = inputSecret.trim() || generateSecretKey();
+    const cleanSecret = inputSecret.trim() || deriveDefaultSecretFromRoomCode(cleanCode);
     onSwitchRoom(cleanCode, cleanSecret);
     onClose();
   };
 
   const handleCreateNewRoom = () => {
     const newCode = generateRoomCode();
-    const newSecret = generateSecretKey();
+    const newSecret = generateSecretKey(newCode);
     onSwitchRoom(newCode, newSecret);
   };
 
@@ -176,9 +187,12 @@ export const PairingModal: React.FC<PairingModalProps> = ({
                         {copiedCode ? <Check className="w-4 h-4 text-[#16A34A]" /> : <Copy className="w-4 h-4" />}
                       </button>
                     </div>
-                    <p className="text-xs text-[#A8A29E]">
-                      Point phone camera to auto-connect with instant encryption key sync.
+                    <p className="text-xs text-[#D6D3CD]">
+                      Scanning this QR automatically opens the app on your phone and connects it to Room <span className="font-mono text-[#FAF8F5] font-medium">{roomCode}</span>.
                     </p>
+                    <div className="text-[11px] text-[#8C877D] bg-[#22211E] p-2 rounded border border-[#2D2C28]">
+                      Note: Devices open with their own private room by default. Scanning the QR or entering the code brings them into this shared mesh.
+                    </div>
                   </div>
                 </div>
 

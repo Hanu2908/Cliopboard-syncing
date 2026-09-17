@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   ClipboardList,
   Share2,
+  X,
 } from 'lucide-react';
 import { Header } from './components/Header';
 import { NewClipInput } from './components/NewClipInput';
@@ -22,9 +23,9 @@ import { LandingPage } from './components/Landing/LandingPage';
 import { useGlobalShortcuts, ShortcutToastInfo } from './hooks/useGlobalShortcuts';
 import { syncManager, IncomingSyncEvent } from './services/syncManager';
 import { getDeviceDetails, updateDeviceName } from './services/deviceInfo';
-import { generateRoomCode, generateSecretKey } from './services/crypto';
+import { generateRoomCode, generateSecretKey, deriveDefaultSecretFromRoomCode } from './services/crypto';
 import { getSavedConfig } from './services/storage';
-import { ContentType, HapticSettings } from './types';
+import { ContentType, HapticSettings, Device } from './types';
 
 export default function App() {
   const [roomCode, setRoomCode] = useState('');
@@ -38,6 +39,8 @@ export default function App() {
   const [hapticFeedback, setHapticFeedback] = useState(syncManager.hapticFeedback);
   const [hapticSettings, setHapticSettings] = useState<HapticSettings>(syncManager.hapticSettings);
   const [latestSyncEvent, setLatestSyncEvent] = useState<IncomingSyncEvent | null>(syncManager.latestSyncEvent);
+  const [latestDeviceEvent, setLatestDeviceEvent] = useState<{ type: 'joined' | 'left'; device: Device } | null>(null);
+  const [pairingNotice, setPairingNotice] = useState<string | null>(null);
 
   // View mode: 'landing' or 'app' (live sync workspace)
   const [viewMode, setViewMode] = useState<'landing' | 'app'>(() => {
@@ -105,36 +108,45 @@ export default function App() {
 
   // Initialize room & sync manager
   useEffect(() => {
-    // 1. Check if URL contains pairing info (hash or query params)
-    let initialRoom = '';
-    let initialKey = '';
+    const parseUrlAndInit = () => {
+      // 1. Check if URL contains pairing info (search params or hash fragments)
+      const searchParams = new URLSearchParams(window.location.search);
+      const hashString = window.location.hash.replace(/^#\/?/, '');
+      const hashParams = new URLSearchParams(hashString.includes('=') ? hashString : '');
 
-    const hash = window.location.hash.substring(1);
-    const search = window.location.search.substring(1);
-    const queryParams = new URLSearchParams(hash || search);
+      const urlRoom = (searchParams.get('room') || hashParams.get('room') || '').trim().toUpperCase();
+      const urlKey = (searchParams.get('key') || hashParams.get('key') || '').trim();
 
-    if (queryParams.get('room')) {
-      initialRoom = queryParams.get('room')!.trim().toUpperCase();
-      initialKey = queryParams.get('key') || '';
-    }
+      const saved = getSavedConfig();
+      const finalRoom = urlRoom || saved.roomCode || generateRoomCode();
+      const finalKey = urlKey || (urlRoom ? deriveDefaultSecretFromRoomCode(urlRoom) : (saved.secretKey || generateSecretKey(finalRoom)));
+      const finalDeviceName = saved.deviceName || deviceDetails.name;
 
-    const saved = getSavedConfig();
-    const finalRoom = initialRoom || saved.roomCode || generateRoomCode();
-    const finalKey = initialKey || saved.secretKey || generateSecretKey();
-    const finalDeviceName = saved.deviceName || deviceDetails.name;
+      if (urlRoom) {
+        setViewMode('app');
+        setPairingNotice(`Connected to Room ${finalRoom}`);
+        setTimeout(() => setPairingNotice(null), 5000);
+      }
 
-    setRoomCode(finalRoom);
-    setSecretKey(finalKey);
-    setCurrentDeviceName(finalDeviceName);
+      setRoomCode(finalRoom);
+      setSecretKey(finalKey);
+      setCurrentDeviceName(finalDeviceName);
 
-    syncManager.init({
-      roomCode: finalRoom,
-      secretKey: finalKey,
-      deviceName: finalDeviceName,
-      deviceId: deviceDetails.id,
-      autoCopyIncoming: !!saved.autoCopyIncoming,
-      hapticFeedback: saved.hapticFeedback !== false,
-    });
+      syncManager.init({
+        roomCode: finalRoom,
+        secretKey: finalKey,
+        deviceName: finalDeviceName,
+        deviceId: deviceDetails.id,
+        autoCopyIncoming: !!saved.autoCopyIncoming,
+        hapticFeedback: saved.hapticFeedback !== false,
+      });
+    };
+
+    parseUrlAndInit();
+
+    // Listen for hash changes or back/forward navigation
+    window.addEventListener('hashchange', parseUrlAndInit);
+    window.addEventListener('popstate', parseUrlAndInit);
 
     // Subscribe to sync updates
     const unsubscribe = syncManager.subscribe(() => {
@@ -147,9 +159,16 @@ export default function App() {
       setHapticFeedback(syncManager.hapticFeedback);
       setHapticSettings({ ...syncManager.hapticSettings });
       setLatestSyncEvent(syncManager.latestSyncEvent);
+
+      if (syncManager.latestDeviceEvent) {
+        setLatestDeviceEvent(syncManager.latestDeviceEvent);
+        setTimeout(() => setLatestDeviceEvent(null), 4500);
+      }
     });
 
     return () => {
+      window.removeEventListener('hashchange', parseUrlAndInit);
+      window.removeEventListener('popstate', parseUrlAndInit);
       unsubscribe();
     };
   }, [deviceDetails]);
@@ -506,6 +525,48 @@ export default function App() {
         event={latestSyncEvent}
         onDismiss={() => syncManager.dismissLatestSyncEvent()}
       />
+
+      {/* Device Joined / Left Notification Toast */}
+      <AnimatePresence>
+        {latestDeviceEvent && (
+          <motion.div
+            initial={{ opacity: 0, y: 16, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 16, scale: 0.95 }}
+            transition={{ duration: 0.15 }}
+            className="fixed bottom-6 left-6 z-50 flex items-center gap-3 px-4 py-2.5 bg-[#1B1A17] border border-[#33312B] rounded-lg shadow-xl text-xs font-mono text-[#FAF8F5]"
+          >
+            <span className="w-2 h-2 rounded-full bg-[#16A34A] animate-pulse" />
+            <div className="flex items-center gap-1.5">
+              <span className="font-semibold text-[#EAE8E2]">{latestDeviceEvent.device.name}</span>
+              <span className="text-[#8C877D]">
+                {latestDeviceEvent.type === 'joined' ? 'joined mesh' : 'left mesh'}
+              </span>
+            </div>
+            <button
+              onClick={() => setLatestDeviceEvent(null)}
+              className="p-1 ml-1 text-[#8C877D] hover:text-[#FAF8F5] transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* URL Room Paired Toast */}
+      <AnimatePresence>
+        {pairingNotice && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-[#1B1A17] border border-[#383632] rounded-full shadow-lg text-xs font-mono text-[#FAF8F5] flex items-center gap-2"
+          >
+            <span className="w-2 h-2 rounded-full bg-[#16A34A]" />
+            <span>{pairingNotice}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

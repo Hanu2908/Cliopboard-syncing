@@ -173,6 +173,28 @@ async function startServer() {
           if (!roomCode || !deviceId) return;
 
           const normCode = roomCode.trim().toUpperCase();
+
+          // If client was previously in a different room, clean up old room membership
+          if (meta.roomCode && meta.roomCode !== normCode) {
+            const oldRoom = rooms.get(meta.roomCode);
+            if (oldRoom) {
+              oldRoom.clients.delete(ws);
+              if (meta.deviceId) {
+                oldRoom.devices.delete(meta.deviceId);
+                const leaveMsg = JSON.stringify({
+                  type: "device:left",
+                  deviceId: meta.deviceId,
+                  devices: Array.from(oldRoom.devices.values()),
+                });
+                for (const client of oldRoom.clients) {
+                  if (client.readyState === WebSocket.OPEN) {
+                    client.send(leaveMsg);
+                  }
+                }
+              }
+            }
+          }
+
           const room = getOrCreateRoom(normCode);
           room.clients.add(ws);
 

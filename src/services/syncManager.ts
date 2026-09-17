@@ -60,6 +60,7 @@ class SyncManager {
   public hapticFeedback: boolean = true;
   public hapticSettings: HapticSettings = { ...DEFAULT_HAPTIC_SETTINGS };
   public latestSyncEvent: IncomingSyncEvent | null = null;
+  public latestDeviceEvent: { type: 'joined' | 'left'; device: Device } | null = null;
 
   private reconnectAttempts = 0;
   private reconnectTimer: number | null = null;
@@ -92,6 +93,7 @@ class SyncManager {
    * Initializes or connects to a sync room
    */
   public async init(config: RoomConfig & { liveClipboardWatch?: boolean }): Promise<void> {
+    const previousRoom = this.roomCode;
     this.roomCode = config.roomCode.trim().toUpperCase();
     this.secretKey = config.secretKey;
     this.autoCopyIncoming = config.autoCopyIncoming !== false; // Default true for instant cross-device copy & paste
@@ -129,6 +131,13 @@ class SyncManager {
       clipboardWatcher.stop();
     }
 
+    const roomChanged = previousRoom && previousRoom !== this.roomCode;
+    if (roomChanged) {
+      this.items = [];
+      this.devices = [];
+      this.notify();
+    }
+
     // 1. Load local cached items first (offline-first!)
     const local = await getLocalItems();
     this.items = local;
@@ -136,8 +145,20 @@ class SyncManager {
     this.pendingCount = pending.length;
     this.notify();
 
-    // 2. Connect WebSocket
-    this.connectWebSocket();
+    // 2. Connect or re-join WebSocket
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(
+        JSON.stringify({
+          type: 'join-room',
+          roomCode: this.roomCode,
+          deviceId: this.currentDevice.id,
+          deviceName: this.currentDevice.name,
+          deviceType: this.currentDevice.type,
+        })
+      );
+    } else {
+      this.connectWebSocket();
+    }
   }
 
   private connectWebSocket(): void {
@@ -264,6 +285,22 @@ class SyncManager {
         ...d,
         isCurrentDevice: d.id === this.currentDevice.id,
       }));
+
+      if (type === 'device:joined' && msg.device && msg.device.id !== this.currentDevice.id) {
+        this.latestDeviceEvent = { type: 'joined', device: msg.device };
+        if (this.hapticFeedback) {
+          playTactileTick({ intensity: 'medium' });
+        }
+      } else if (type === 'device:left' && msg.deviceId && msg.deviceId !== this.currentDevice.id) {
+        const leftDev = this.devices.find((d) => d.id === msg.deviceId) || {
+          id: msg.deviceId,
+          name: 'Device',
+          type: 'desktop' as const,
+          joinedAt: 0,
+          lastSeen: 0,
+        };
+        this.latestDeviceEvent = { type: 'left', device: leftDev };
+      }
       this.notify();
     } else if (type === 'item:new') {
       const encItem: EncryptedClipboardItem = msg.item;
