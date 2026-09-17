@@ -126,13 +126,27 @@ export const Header: React.FC<HeaderProps> = ({
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
             onClick={onOpenDevices}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#191816] hover:bg-[#22211E] border border-[#282724] text-xs text-[#D6D3CD] transition-colors cursor-pointer"
-            title="View connected devices"
+            className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-[#191816] hover:bg-[#22211E] border border-[#282724] text-xs text-[#D6D3CD] transition-colors cursor-pointer"
+            title="View connected devices in mesh"
           >
-            <Laptop className="w-3.5 h-3.5 text-[#8C877D]" />
-            <span className="font-mono text-xs">
+            <div className="relative flex items-center justify-center">
+              <Laptop className="w-3.5 h-3.5 text-[#8C877D]" />
+              {devices.length > 1 && (
+                <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#16A34A] opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#16A34A]" />
+                </span>
+              )}
+            </div>
+            <motion.span
+              key={devices.length}
+              initial={{ scale: 1.2, color: '#FAF8F5' }}
+              animate={{ scale: 1, color: '#D6D3CD' }}
+              transition={{ duration: 0.2 }}
+              className="font-mono text-xs"
+            >
               {devices.length || 1} {devices.length === 1 ? 'device' : 'devices'}
-            </span>
+            </motion.span>
           </motion.button>
 
           {/* Pair Device */}

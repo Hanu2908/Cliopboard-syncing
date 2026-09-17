@@ -134,8 +134,10 @@ class SyncManager {
     const roomChanged = previousRoom && previousRoom !== this.roomCode;
     if (roomChanged) {
       this.items = [];
-      this.devices = [];
+      this.devices = [this.currentDevice];
       this.notify();
+    } else if (this.devices.length === 0) {
+      this.devices = [this.currentDevice];
     }
 
     // 1. Load local cached items first (offline-first!)
@@ -269,10 +271,15 @@ class SyncManager {
       const rawItems: EncryptedClipboardItem[] = msg.items || [];
       const remoteDevices: Device[] = msg.devices || [];
 
-      this.devices = remoteDevices.map((d) => ({
-        ...d,
-        isCurrentDevice: d.id === this.currentDevice.id,
-      }));
+      const devMap = new Map<string, Device>();
+      devMap.set(this.currentDevice.id, this.currentDevice);
+      for (const d of remoteDevices) {
+        devMap.set(d.id, {
+          ...d,
+          isCurrentDevice: d.id === this.currentDevice.id,
+        });
+      }
+      this.devices = Array.from(devMap.values());
 
       // Decrypt items in parallel
       for (const enc of rawItems) {
@@ -281,10 +288,15 @@ class SyncManager {
       this.notify();
     } else if (type === 'device:joined' || type === 'device:left') {
       const remoteDevices: Device[] = msg.devices || [];
-      this.devices = remoteDevices.map((d) => ({
-        ...d,
-        isCurrentDevice: d.id === this.currentDevice.id,
-      }));
+      const devMap = new Map<string, Device>();
+      devMap.set(this.currentDevice.id, this.currentDevice);
+      for (const d of remoteDevices) {
+        devMap.set(d.id, {
+          ...d,
+          isCurrentDevice: d.id === this.currentDevice.id,
+        });
+      }
+      this.devices = Array.from(devMap.values());
 
       if (type === 'device:joined' && msg.device && msg.device.id !== this.currentDevice.id) {
         this.latestDeviceEvent = { type: 'joined', device: msg.device };
