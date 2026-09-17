@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@layer base {
+  * {
+    border-color: #262523;
+  }
+  body {
+    font-family: 'Gothic A1', 'After', 'Zen Kaku Gothic New', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #121211;
+    color: #EAE8E2;
+    overflow-x: hidden;
+  }
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Custom typography classes: Gothif, After, Newblack */
+.font-gothic {
+  font-family: 'Gothif', 'Gothic A1', 'Zen Kaku Gothic New', 'League Gothic', 'Century Gothic', -apple-system, sans-serif;
+}
+
+.font-after {
+  font-family: 'After', 'Outfit', 'Plus Jakarta Sans', system-ui, sans-serif;
+}
+
+.font-newblack {
+  font-family: 'NewBlack', 'New Black', 'Archivo Black', 'Gothic A1', sans-serif;
+  font-weight: 900;
+  letter-spacing: -0.035em;
+}
+
+/* Custom minimal scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #161514;
+}
+::-webkit-scrollbar-thumb {
+  background: #2E2D2A;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #42403B;
+}
+
+/* Subtle focus outlines */
+input:focus, textarea:focus, button:focus-visible {
+  outline: 1px solid #D97706;
+  outline-offset: 1px;
+}
